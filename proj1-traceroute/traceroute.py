@@ -156,10 +156,40 @@ def traceroute(sendsock: util.Socket, recvsock: util.Socket, ip: str) \
     for ttl in range(1, TRACEROUTE_MAX_TTL+1):
         sendsock.set_ttl(ttl)
         routers = []
-        for _ in range(PROBE_ATTEMPT_COUNT):
-            sendsock.sendto(b"traceroute probe", (ip, TRACEROUTE_PORT_NUMBER))
+        port = TRACEROUTE_PORT_NUMBER + ttl - 1
+        for attempt in range(PROBE_ATTEMPT_COUNT):
+            sendsock.sendto(b"traceroute probe", (ip, port))
             if recvsock.recv_select():  
                 buf, addr = recvsock.recvfrom()
+                if len(buf) < 20:
+                    continue
+                ipv4 = IPv4(buf)
+                if ipv4.proto != 1:
+                    continue
+                if len(buf) < ipv4.header_len + 4:
+                    continue
+                icmp = ICMP(buf[ipv4.header_len:ipv4.header_len+4])
+                if not (
+                    (icmp.type == 11 and icmp.code == 0) or
+                    (icmp.type == 3 and icmp.code == 3)
+                ):
+                    continue
+                if len(buf) < ipv4.header_len + 8:
+                    continue
+                icmp_payload_start = ipv4.header_len + 8
+                if len(buf) < icmp_payload_start + 20:
+                    continue
+                icmp_inner_ipv4 = IPv4(buf[icmp_payload_start:])
+                if icmp_inner_ipv4.proto != 17:
+                    continue
+                if icmp_inner_ipv4.dst != ip:
+                    continue
+                icmp_inner_udp_start = icmp_inner_ipv4.header_len + icmp_payload_start
+                if len(buf) < icmp_inner_udp_start + 8:
+                    continue
+                icmp_inner_udp = UDP(buf[icmp_inner_udp_start:icmp_inner_udp_start+8])
+                if icmp_inner_udp.dst_port != port:
+                    continue
                 router_ip = addr[0]
                 if router_ip not in routers:
                     routers.append(router_ip)
@@ -167,7 +197,6 @@ def traceroute(sendsock: util.Socket, recvsock: util.Socket, ip: str) \
         discovered_routers.append(routers)
         if ip in routers:
             break
-    print(discovered_routers)
     return discovered_routers
 
 if __name__ == '__main__':
